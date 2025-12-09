@@ -342,7 +342,7 @@ ccm_coeff = 1.0  # 确保是浮点数
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, max_norm: float = 0.1,
+                    device: torch.device, epoch: int, max_norm: float = 1.0,
                     wo_class_error=False, lr_scheduler=None, args=None, logger=None, ema_m=None):
     # 1. 模型参数健康检查 (防止由上一个Epoch遗留的NaN)
     if epoch >= 1:
@@ -467,7 +467,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     # 接着 scaler.step 会检测到 NaN，从而跳过 optimizer.step 并减小 scale 因子
                     if torch.isnan(total_norm) or torch.isinf(total_norm):
                         print(
-                            f"⚠️ Warning: Gradients are NaN/Inf (Norm: {total_norm.item()}) at batch {_cnt}. Auto-skipping step.")
+                            f"⚠️ Warning: Gradients are NaN/Inf (Norm: {total_norm.item()}) at batch {_cnt}. Skipping step.")
+                        scaler.update()  # Update scaler to adjust scale factor
+                        optimizer.zero_grad()  # 清空梯度
+                        continue  # Skip optimizer step
 
                 # 3. Step & Update (必须总是调用)
                 scaler.step(optimizer)

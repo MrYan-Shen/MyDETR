@@ -279,6 +279,16 @@ class DQDETR(nn.Module):
         # hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select= self.transformer(srcs, masks, poss, targets, args_dn)
         hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, \
             counting_output, num_select, dynamic_info = self.transformer(srcs, masks, poss, targets, args_dn)
+        # 🔥 添加安全检查
+        if torch.isnan(hs).any() or torch.isinf(hs).any():
+            print("⚠️ Warning: hs contains NaN/Inf after transformer")
+            hs = torch.nan_to_num(hs, nan=0.0, posinf=1.0, neginf=-1.0)
+
+        if torch.isnan(reference[-1]).any() or torch.isinf(reference[-1]).any():
+            print("⚠️ Warning: reference contains NaN/Inf after transformer")
+            for i in range(len(reference)):
+                reference[i] = torch.nan_to_num(reference[i], nan=0.5, posinf=0.95, neginf=0.05)
+                reference[i] = reference[i].clamp(min=0.01, max=0.99)
 
         # In case num object=0
         hs[0] += self.label_enc.weight[0,0]*0.0
@@ -921,8 +931,8 @@ def build_dqdetr(args):
     # 在 models/dqdetr.py 的 build_dqdetr 函数中
     # 找到 weight_dict 定义部分，添加：
     if getattr(args, 'use_dynamic_query', False):
-        weight_dict['loss_interval'] = getattr(args, 'loss_interval_coef', 1.0)
-        weight_dict['loss_boundary'] = getattr(args, 'loss_boundary_coef', 0.01)
+        weight_dict['loss_interval'] = getattr(args, 'loss_interval_coef', 0.5)
+        weight_dict['loss_boundary'] = getattr(args, 'loss_boundary_coef', 0.005)
     weight_dict['loss_giou'] = args.giou_loss_coef
 
     clean_weight_dict_wo_dn = copy.deepcopy(weight_dict)

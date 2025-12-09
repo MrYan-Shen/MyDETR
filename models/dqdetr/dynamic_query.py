@@ -92,17 +92,19 @@ class LearnableBoundaryPredictor(nn.Module):
         # b3 = b2 + softplus(t3)
         softplus_values = F.softplus(raw_boundaries)  # (BS, 3)
         # 🔥 防止累加溢出
-        softplus_values = softplus_values.clamp(min=1e-4, max=self.max_objects / 3)
+        softplus_values = softplus_values.clamp(min=1e-4, max=self.max_objects / 4)
 
         boundaries = torch.cumsum(softplus_values, dim=1)  # 累加确保单调递增
 
-        # 4. 归一化到 [0, max_objects] 范围
-        # 归一化
-        max_boundary = boundaries[:, -1:].clamp(min=1e-4)
-        boundaries = boundaries * (self.max_objects / max_boundary)
+        # 4. 归一化到 [0, max_objects] 范围，🔥 修复：确保 b1 < b2 < b3 且合理分布
+        boundaries = boundaries.clamp(min=1.0, max=self.max_objects * 0.9)
 
-        # 🔥 最终裁剪
-        boundaries = boundaries.clamp(min=1.0, max=self.max_objects)
+        for i in range(1, boundaries.shape[1]):
+            min_gap = 10.0  # 最小间隔
+            boundaries[:, i] = torch.max(
+                boundaries[:, i],
+                boundaries[:, i-1] + min_gap
+            )
 
         return boundaries, raw_boundaries
 
@@ -115,32 +117,26 @@ class LearnableBoundaryPredictor(nn.Module):
         输出:
             probs: (BS, 4) - 四个区间的概率分布
         """
-        BS = boundaries.shape[0]
-        device = boundaries.device
 
-        # 扩展维度便于计算
         b1, b2, b3 = boundaries[:, 0], boundaries[:, 1], boundaries[:, 2]
-        N = real_count.float().unsqueeze(1)  # (BS, 1)
-        r = self.smoothness.clamp(min=0.01, max=10.0)
+        N = real_count.float().unsqueeze(1)
+        r = self.smoothness.clamp(min=0.1, max=5.0)  # 限制范围
 
-        # 根据公式计算四个区间概率
-        # 使用 Sigmoid 计算
-        sig_b1 = torch.sigmoid((b1.unsqueeze(1) - N) / r)
-        sig_b2 = torch.sigmoid((b2.unsqueeze(1) - N) / r)
-        sig_b3 = torch.sigmoid((b3.unsqueeze(1) - N) / r)
+        # 使用 tanh 替代 sigmoid，数值更稳定
+        def soft_interval(x, lower, upper, r):
+            """软区间指示函数"""
+            left = torch.tanh((x - lower) / r)
+            right = torch.tanh((upper - x) / r)
+            return ((left + 1) * (right + 1) / 4).clamp(0, 1)
 
-        p1 = sig_b1
-        p2 = (sig_b2 - sig_b1).clamp(min=0.0)  # 确保非负
-        p3 = (sig_b3 - sig_b2).clamp(min=0.0)  # 确保非负
-        p4 = (1.0 - sig_b3).clamp(min=0.0)
+        # 计算四个区间的概率
+        p1 = soft_interval(N, 0, b1, r)
+        p2 = soft_interval(N, b1, b2, r)
+        p3 = soft_interval(N, b2, b3, r)
+        p4 = soft_interval(N, b3, self.max_objects, r)
 
-        # 拼接成 (BS, 4)
         probs = torch.cat([p1, p2, p3, p4], dim=1)
-        # 🔥 裁剪负概率（由于浮点误差可能出现）
         probs = safe_prob_normalize(probs)
-
-        # 归一化确保概率和为1
-        probs = probs / (probs.sum(dim=1, keepdim=True) + 1e-6)
 
         return probs
 
@@ -286,10 +282,9 @@ class QualityAwareQueryInitializer(nn.Module):
 
         # 4. 坐标回归
         coords_map = self.coord_regressor(feat_refined).permute(0, 2, 3, 1)
-        # 防止坐标异常
         coords_map = torch.nan_to_num(coords_map, nan=0.5)
         # 修改：限制坐标范围，留出eps余量，防止inverse_sigmoid爆炸
-        coords_map = coords_map.clamp(min=1e-5, max=1.0 - 1e-5)
+        coords_map = coords_map.clamp(min=0.05, max=0.95)
 
         # 5. Top-K选择（为每个样本选择不同数量的查询）
         max_K = num_queries.max().item()
@@ -341,6 +336,9 @@ class QualityAwareQueryInitializer(nn.Module):
         # 🔥🔥 修改：初始化为 0.5 (图像中心)，而不是 0.0
         # 0.0 经过 inverse_sigmoid 会变成负无穷或极大负数，导致 attention 采样越界和 NaN 梯度
         reference_points = torch.full((BS, max_K, 4), 0.5, device=device)
+        # 为 padding 的位置设置合理的默认框：中心位置，小尺寸
+        reference_points[..., 2:] = 0.1  # w, h = 0.1
+
         quality_scores = torch.zeros(BS, max_K, device=device)
 
         for b in range(BS):

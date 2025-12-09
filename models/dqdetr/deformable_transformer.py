@@ -266,7 +266,8 @@ class DeformableTransformer(nn.Module):
         valid_ratio_h = valid_H.float() / H
         valid_ratio_w = valid_W.float() / W
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
-        return valid_ratio
+        # 🔥 [FIX] 防止除零：限制最小比例，避免产生 Inf
+        return valid_ratio.clamp(min=1e-6)
 
     def init_ref_points(self, use_num_queries):
         self.refpoint_embed = nn.Embedding(use_num_queries, 4)
@@ -403,7 +404,7 @@ class DeformableTransformer(nn.Module):
                 num_classes=args_dn[4],
                 hidden_dim=args_dn[5],
                 label_enc=args_dn[6],
-                # initial_reference_points=reference_points_init  # 🔥传入动态参考点
+                initial_reference_points=reference_points_init  # 🔥传入动态参考点
             )
         else:
             # 原始逻辑
@@ -413,7 +414,8 @@ class DeformableTransformer(nn.Module):
                 num_queries=num_select,
                 num_classes=args_dn[4],
                 hidden_dim=args_dn[5],
-                label_enc=args_dn[6]
+                label_enc=args_dn[6],
+                initial_reference_points=Non
             )
 
         if self.two_stage_type =='standard':
@@ -446,23 +448,39 @@ class DeformableTransformer(nn.Module):
             topk_proposals = torch.topk(enc_outputs_class_unselected.max(-1)[0], topk, dim=1)[1] # bs, nq
 
             # gather boxes
-            refpoint_embed_undetach = torch.gather(enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)) # unsigmoid
+            # 🔥 使用动态初始化的参考点
+            #BS = memory.shape[0]
+            refpoint_embed_undetach = torch.gather(enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4))  # unsigmoid
             # refpoint_embed_ = refpoint_embed_undetach.detach()
+
             if reference_points_init is not None:
-                # 🔥 使用动态初始化的参考点
-                BS = len(tgt)
-                max_K = reference_points_init.shape[1]
-                # 选择topk个作为two-stage的refpoint
-                refpoint_embed_ = reference_points_init[:, :topk, :].detach()
+                # 🔥 [FIX 2] 动态查询路径修复
+                # reference_points_init 是归一化的 (0-1)，形状 (BS, max_K, 4)
+                # 我们需要截取前 topk 个，并转换为 unsigmoid 格式传给解码器
+                valid_k = min(topk, reference_points_init.shape[1])
+
+                # 1. 截取并 Detach
+                dq_points_sigmoid = reference_points_init[:, :valid_k, :].detach()
+
+                # 2. 这里的 refpoint_embed_ 必须是 Inverse Sigmoid 后的值！
+                #    先 clamp 防止 logit 出现 Inf
+                dq_points_sigmoid = dq_points_sigmoid.clamp(min=0.05, max=0.95)
+                # 3. 转换为 unsigmoid 格式（logit）
+                refpoint_embed_ = inverse_sigmoid(dq_points_sigmoid)
+                # 4. 🔥 额外保护：限制 logit 范围，防止极值
+                refpoint_embed_ = refpoint_embed_.clamp(min=-2.5, max=2.5)
+                # 5. init_box_proposal 用于监督，应该是 sigmoid 后的值
+                init_box_proposal = dq_points_sigmoid
             else:
                 # 原始逻辑
                 refpoint_embed_ = refpoint_embed_undetach.detach()
-            init_box_proposal = torch.gather(output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)).sigmoid() # sigmoid
+                init_box_proposal = torch.gather(output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)).sigmoid()  # sigmoid
 
             # gather tgt
             tgt_undetach = torch.gather(output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model))
             if self.embed_init_tgt:
-                tgt_ = self.tgt_embed.weight[0:topk, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, d_model
+                # 此处修改了BS
+                tgt_ = self.tgt_embed.weight[0:topk, None, :].repeat(1, bs, 1).transpose(0, 1)  # nq, bs, d_model
             else:
                 tgt_ = tgt_undetach.detach()
 
@@ -473,6 +491,8 @@ class DeformableTransformer(nn.Module):
                 refpoint_embed,tgt=refpoint_embed_,tgt_
 
         elif self.two_stage_type == 'no':
+            # BS的问题
+            # BS = memory.shape[0]
             tgt_ = self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, d_model
             refpoint_embed_ = self.refpoint_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, 4
 
