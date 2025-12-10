@@ -66,7 +66,7 @@ class LearnableBoundaryPredictor(nn.Module):
         """
         # 🔥 输入检查
         if torch.isnan(density_feature).any() or torch.isinf(density_feature).any():
-            print("  Warning: density_feature has NaN/Inf, applying fix")
+            # print("  Warning: density_feature has NaN/Inf, applying fix") # 可选：注释掉避免刷屏
             density_feature = torch.nan_to_num(density_feature, nan=0.0, posinf=1.0, neginf=0.0)
             density_feature = density_feature.clamp(min=-10.0, max=10.0)
 
@@ -74,37 +74,47 @@ class LearnableBoundaryPredictor(nn.Module):
         feat_avg = self.global_pool_avg(density_feature).flatten(1)  # (BS, C)
         feat_max = self.global_pool_max(density_feature).flatten(1)  # (BS, C)
 
-        # 🔥 特征裁剪，防止极端值
+        # 🔥 特征裁剪
         feat_avg = feat_avg.clamp(min=-10.0, max=10.0)
         feat_max = feat_max.clamp(min=-10.0, max=10.0)
 
         global_feat = torch.cat([feat_avg, feat_max], dim=1)  # (BS, 2C)
 
-        # 2. 预测原始边界 [t1, t2, t3]
+        # 2. 预测原始边界
         raw_boundaries = self.boundary_predictor(global_feat)  # (BS, 3)
-
-        # 🔥 限制原始边界范围，防止softplus溢出
         raw_boundaries = raw_boundaries.clamp(min=-10.0, max=10.0)
 
-        # 3. 累加Softplus变换确保有序性: b1 < b2 < b3
-        # b1 = softplus(t1)
-        # b2 = b1 + softplus(t2)
-        # b3 = b2 + softplus(t3)
-        softplus_values = F.softplus(raw_boundaries)  # (BS, 3)
-        # 🔥 防止累加溢出
+        # 3. 累加Softplus
+        softplus_values = F.softplus(raw_boundaries)
         softplus_values = softplus_values.clamp(min=1e-4, max=self.max_objects / 4)
+        boundaries = torch.cumsum(softplus_values, dim=1)
 
-        boundaries = torch.cumsum(softplus_values, dim=1)  # 累加确保单调递增
-
-        # 4. 归一化到 [0, max_objects] 范围，🔥 修复：确保 b1 < b2 < b3 且合理分布
+        # 4. 归一化到 [0, max_objects] 范围
         boundaries = boundaries.clamp(min=1.0, max=self.max_objects * 0.9)
 
+        # ==================== 🔥 修复开始 ====================
+        # 修复说明：消除 boundaries[:, i] = ... 的原位修改
+        # 改为使用列表收集每一列，最后 stack
+
+        boundaries_list = []
+        # 第一个边界 b1 直接取值
+        boundaries_list.append(boundaries[:, 0])
+
+        min_gap = 10.0
         for i in range(1, boundaries.shape[1]):
-            min_gap = 10.0  # 最小间隔
-            boundaries[:, i] = torch.max(
-                boundaries[:, i],
-                boundaries[:, i-1] + min_gap
-            )
+            # 获取上一个已处理的边界（来自列表，而不是原张量）
+            prev_b = boundaries_list[-1]
+            # 获取当前预测的原始边界
+            curr_b = boundaries[:, i]
+
+            # 计算新的当前边界：max(当前值, 上一个值 + 间隔)
+            # 这会创建一个新的张量 new_b，而不是修改原张量
+            new_b = torch.max(curr_b, prev_b + min_gap)
+            boundaries_list.append(new_b)
+
+        # 重新堆叠回 (BS, 3)
+        boundaries = torch.stack(boundaries_list, dim=1)
+        # ==================== 🔥 修复结束 ====================
 
         return boundaries, raw_boundaries
 

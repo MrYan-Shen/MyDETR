@@ -279,16 +279,34 @@ class DQDETR(nn.Module):
         # hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select= self.transformer(srcs, masks, poss, targets, args_dn)
         hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, \
             counting_output, num_select, dynamic_info = self.transformer(srcs, masks, poss, targets, args_dn)
-        # 🔥 添加安全检查
-        if torch.isnan(hs).any() or torch.isinf(hs).any():
-            print("⚠️ Warning: hs contains NaN/Inf after transformer")
-            hs = torch.nan_to_num(hs, nan=0.0, posinf=1.0, neginf=-1.0)
 
-        if torch.isnan(reference[-1]).any() or torch.isinf(reference[-1]).any():
+        hs_dirty = False
+        for h in hs:
+            if torch.isnan(h).any() or torch.isinf(h).any():
+                hs_dirty = True
+                break
+
+        if hs_dirty:
+            print("⚠️ Warning: hs contains NaN/Inf after transformer")
+            # 重建列表，对每个 tensor 进行清理
+            hs = [torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(min=-10.0, max=10.0) for h in hs]
+
+        # 2. 检查并修复 reference (List[Tensor])
+        ref_dirty = False
+        for ref in reference:
+            if torch.isnan(ref).any() or torch.isinf(ref).any():
+                ref_dirty = True
+                break
+
+        if ref_dirty:
             print("⚠️ Warning: reference contains NaN/Inf after transformer")
-            for i in range(len(reference)):
-                reference[i] = torch.nan_to_num(reference[i], nan=0.5, posinf=0.95, neginf=0.05)
-                reference[i] = reference[i].clamp(min=0.01, max=0.99)
+            # 重建列表，对每个 tensor 进行清理
+            new_reference = []
+            for ref in reference:
+                clean_ref = torch.nan_to_num(ref, nan=0.5, posinf=0.95, neginf=0.05)
+                clean_ref = clean_ref.clamp(min=0.01, max=0.99)
+                new_reference.append(clean_ref)
+            reference = new_reference
 
         # In case num object=0
         hs[0] += self.label_enc.weight[0,0]*0.0
