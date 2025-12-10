@@ -274,40 +274,8 @@ class DQDETR(nn.Module):
         args_dn = [self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale, self.training, self.num_classes, self.hidden_dim, self.label_enc]
         
         # attn_mask !!!!!!!!!!!!!!!!!!!!!
-        # Transformer 前向传播
-        # hs: 解码器输出, reference: 解码器每层参考点, hs_enc/ref_enc: 编码器输出/参考点 (如果 two-stage), dn_meta: DN 训练元信息
-        # hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select= self.transformer(srcs, masks, poss, targets, args_dn)
-        hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, \
-            counting_output, num_select, dynamic_info = self.transformer(srcs, masks, poss, targets, args_dn)
-
-        hs_dirty = False
-        for h in hs:
-            if torch.isnan(h).any() or torch.isinf(h).any():
-                hs_dirty = True
-                break
-
-        if hs_dirty:
-            print("⚠️ Warning: hs contains NaN/Inf after transformer")
-            # 重建列表，对每个 tensor 进行清理
-            hs = [torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0).clamp(min=-10.0, max=10.0) for h in hs]
-
-        # 2. 检查并修复 reference (List[Tensor])
-        ref_dirty = False
-        for ref in reference:
-            if torch.isnan(ref).any() or torch.isinf(ref).any():
-                ref_dirty = True
-                break
-
-        if ref_dirty:
-            print("⚠️ Warning: reference contains NaN/Inf after transformer")
-            # 重建列表，对每个 tensor 进行清理
-            new_reference = []
-            for ref in reference:
-                clean_ref = torch.nan_to_num(ref, nan=0.5, posinf=0.95, neginf=0.05)
-                clean_ref = clean_ref.clamp(min=0.01, max=0.99)
-                new_reference.append(clean_ref)
-            reference = new_reference
-
+        hs, reference, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select= self.transformer(srcs, masks, poss, targets, args_dn)
+       
         # In case num object=0
         hs[0] += self.label_enc.weight[0,0]*0.0
 
@@ -364,11 +332,9 @@ class DQDETR(nn.Module):
                     {'pred_logits': a, 'pred_boxes': b} for a, b in zip(enc_outputs_class, enc_outputs_coord)
                 ]
 
-        out['dn_meta'] = dn_meta  # DN 训练元数据
-        out['pred_bbox_number'] = counting_output  # (可选)
-        out['num_select'] = num_select  # (可选)
-        if dynamic_info is not None:
-            out['dynamic_info'] = dynamic_info  # 🔥 传递动态查询信息给损失计算
+        out['dn_meta'] = dn_meta
+        out['pred_bbox_number'] = counting_output
+        out['num_select'] = num_select
 
         return out
 
@@ -405,68 +371,6 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.losses = losses
         self.focal_alpha = focal_alpha
-        # 🔥 动态查询损失权重
-        self.use_dynamic_query = 'loss_boundary' in weight_dict or 'loss_interval' in weight_dict
-        self.boundary_l2_weight = getattr(self, 'boundary_l2_weight', 0.01)
-
-    def loss_dynamic_query(self, outputs, targets, **kwargs):
-        """
-        动态查询机制的损失
-        包括：1) 区间分类交叉熵损失  2) 边界L2正则化损失
-        """
-        if 'dynamic_info' not in outputs or outputs['dynamic_info'] is None:
-            # 未启用动态查询，返回零损失
-            return {
-                'loss_interval': torch.tensor(0.0, device=next(iter(outputs.values())).device),
-                'loss_boundary': torch.tensor(0.0, device=next(iter(outputs.values())).device)
-            }
-        dynamic_info = outputs['dynamic_info']
-        device = dynamic_info['boundaries'].device
-
-        losses = {}
-
-        # 1. 区间分类损失（交叉熵）
-        if 'interval_probs' in dynamic_info and dynamic_info['interval_probs'] is not None:
-            interval_probs = dynamic_info['interval_probs']  # (BS, 4)
-            boundaries = dynamic_info['boundaries']  # (BS, 3)
-
-            # 计算真实标签（属于哪个区间）
-            real_counts = torch.tensor(
-                [len(t['labels']) for t in targets],
-                dtype=torch.float32,
-                device=device
-            )
-
-            # 根据真实数量确定真实区间
-            b1, b2, b3 = boundaries[:, 0], boundaries[:, 1], boundaries[:, 2]
-            true_intervals = torch.zeros(len(targets), dtype=torch.long, device=device)
-
-            true_intervals[real_counts <= b1] = 0
-            true_intervals[(real_counts > b1) & (real_counts <= b2)] = 1
-            true_intervals[(real_counts > b2) & (real_counts <= b3)] = 2
-            true_intervals[real_counts > b3] = 3
-
-            # 交叉熵损失
-            loss_interval = F.cross_entropy(
-                interval_probs,
-                true_intervals,
-                reduction='mean'
-            )
-            losses['loss_interval'] = loss_interval
-        else:
-            losses['loss_interval'] = torch.tensor(0.0, device=device)
-
-        # 2. 边界L2正则化损失（防止边界过度偏离）
-        if 'raw_boundaries' in dynamic_info:
-            raw_boundaries = dynamic_info['raw_boundaries']  # (BS, 3)
-
-            # L2正则化：鼓励raw_boundaries接近0（让边界均匀分布）
-            loss_boundary = torch.mean(raw_boundaries ** 2) * self.boundary_l2_weight
-            losses['loss_boundary'] = loss_boundary
-        else:
-            losses['loss_boundary'] = torch.tensor(0.0, device=device)
-
-        return losses
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
@@ -526,32 +430,13 @@ class SetCriterion(nn.Module):
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
-        # 🔥 添加安全检查
-        src_boxes = torch.nan_to_num(src_boxes, nan=0.5, posinf=1.0, neginf=0.0)
-        src_boxes = src_boxes.clamp(min=0.0, max=1.0)
-        target_boxes = torch.nan_to_num(target_boxes, nan=0.5, posinf=1.0, neginf=0.0)
-        target_boxes = target_boxes.clamp(min=0.0, max=1.0)
-
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
-        # GIoU 损失
-        try:
-            giou_val = box_ops.generalized_box_iou(
-                box_ops.box_cxcywh_to_xyxy(src_boxes),
-                box_ops.box_cxcywh_to_xyxy(target_boxes)
-            )
-            loss_giou = 1 - torch.diag(giou_val)
-
-            # 检查是否有异常值
-            if torch.isnan(loss_giou).any() or torch.isinf(loss_giou).any():
-                print("⚠️  Warning: loss_giou has NaN/Inf, setting to 0")
-                loss_giou = torch.zeros_like(loss_giou)
-        except Exception as e:
-            print(f"⚠️  Warning: GIoU loss calculation failed: {e}")
-            loss_giou = torch.zeros(src_boxes.shape[0], device=src_boxes.device)
-
+        loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
+            box_ops.box_cxcywh_to_xyxy(src_boxes),
+            box_ops.box_cxcywh_to_xyxy(target_boxes)))
         losses['loss_giou'] = loss_giou.sum() / num_boxes
 
         # calculate the x,y and h,w loss
@@ -646,14 +531,8 @@ class SetCriterion(nn.Module):
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
 
-
         # Compute all the requested losses
         losses = {}
-
-        # 🔥 动态查询损失
-        if self.use_dynamic_query:
-            dq_losses = self.loss_dynamic_query(outputs, targets)
-            losses.update(dq_losses)
 
         # prepare for dn loss
         dn_meta = outputs['dn_meta']
@@ -944,15 +823,8 @@ def build_dqdetr(args):
 
     # prepare weight dict
     # 5. 准备损失权重字典 (weight_dict)
-
     weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
-    # 在 models/dqdetr.py 的 build_dqdetr 函数中
-    # 找到 weight_dict 定义部分，添加：
-    if getattr(args, 'use_dynamic_query', False):
-        weight_dict['loss_interval'] = getattr(args, 'loss_interval_coef', 0.5)
-        weight_dict['loss_boundary'] = getattr(args, 'loss_boundary_coef', 0.005)
     weight_dict['loss_giou'] = args.giou_loss_coef
-
     clean_weight_dict_wo_dn = copy.deepcopy(weight_dict)
 
     
@@ -994,15 +866,7 @@ def build_dqdetr(args):
             interm_loss_coef = args.interm_loss_coef
         except:
             interm_loss_coef = 1.0
-        # interm_weight_dict.update({k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k] for k, v in clean_weight_dict_wo_dn.items()})
-        # 修改后：增加 if k in _coeff_weight_dict 判断，防止 KeyError
-        # 仅对 _coeff_weight_dict 中存在的键（如 box, ce, giou）生成中间层权重
-        # 自动跳过 loss_interval 等不需要在中间层计算的损失
-        interm_weight_dict.update({
-            k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k]
-            for k, v in clean_weight_dict_wo_dn.items()
-            if k in _coeff_weight_dict
-        })
+        interm_weight_dict.update({k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k] for k, v in clean_weight_dict_wo_dn.items()})
         weight_dict.update(interm_weight_dict)
 
     # 6. 定义要使用的损失列表

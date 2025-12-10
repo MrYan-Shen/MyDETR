@@ -572,18 +572,11 @@ class color_sys():
     def __call__(self, idx):
         return self.colors[idx]
 
-# 原来的
-# def inverse_sigmoid(x, eps=1e-3):
-#     x = x.clamp(min=0, max=1)
-#     x1 = x.clamp(min=eps)
-#     x2 = (1 - x).clamp(min=eps)
-#     return torch.log(x1/x2)
-# 12月08日改的
-def inverse_sigmoid(x, eps=1e-5):
+def inverse_sigmoid(x, eps=1e-3):
     x = x.clamp(min=0, max=1)
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
-    return torch.log(x1 / x2)
+    return torch.log(x1/x2)
 
 def clean_state_dict(state_dict):
     new_state_dict = OrderedDict()

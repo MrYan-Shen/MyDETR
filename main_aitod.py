@@ -93,7 +93,6 @@ def build_model_main(args):
     model, criterion, postprocessors = build_func(args)
     return model, criterion, postprocessors
 
-
 def main(args):
     # 定期清理显存
     gc.collect()
@@ -132,10 +131,9 @@ def main(args):
 
     # setup logger
     os.makedirs(args.output_dir, exist_ok=True)
-    logger = setup_logger(output=os.path.join(args.output_dir, 'info.txt'), distributed_rank=args.rank, color=False,
-                          name="detr")
+    logger = setup_logger(output=os.path.join(args.output_dir, 'info.txt'), distributed_rank=args.rank, color=False, name="detr")
     logger.info("git:\n  {}\n".format(utils.get_sha()))
-    logger.info("Command: " + ' '.join(sys.argv))
+    logger.info("Command: "+' '.join(sys.argv))
     if args.rank == 0:
         save_json_path = os.path.join(args.output_dir, "config_args_all.json")
         with open(save_json_path, 'w') as f:
@@ -290,7 +288,7 @@ def main(args):
 
     start_time = time.time()
     best_map_holder = BestMetricHolder(use_ema=args.use_ema)
-
+    
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start_time = time.time()
         if args.distributed:

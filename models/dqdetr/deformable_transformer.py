@@ -17,8 +17,6 @@ from typing import Optional
 
 import torch
 from torch import nn, Tensor
-import torch
-import math
 
 from util.misc import inverse_sigmoid
 from .utils import gen_encoder_output_proposals, MLP,_get_activation_fn, gen_sineembed_for_position
@@ -31,11 +29,11 @@ from .cgfe import CGFE, MultiScaleFeature
 
 class DeformableTransformer(nn.Module):
 
-    def __init__(self, args, d_model=256, nhead=8,
-                 num_queries=300,
+    def __init__(self, d_model=256, nhead=8, 
+                 num_queries=300, 
                  num_encoder_layers=6,
                  num_unicoder_layers=0,
-                 num_decoder_layers=6,
+                 num_decoder_layers=6, 
                  dim_feedforward=2048, dropout=0.0,
                  activation="relu", normalize_before=False,
                  return_intermediate_dec=False, query_dim=4,
@@ -71,12 +69,12 @@ class DeformableTransformer(nn.Module):
                  layer_share_type=None,
                  # for detach
                  rm_detach=None,
-                 decoder_sa_type='ca',
+                 decoder_sa_type='ca', 
                  module_seq=['sa', 'ca', 'ffn'],
                  # for dn
                  embed_init_tgt=False,
                  use_detached_boxes_dec_out=False,
-
+                 
                  dynamic_query_list = None,
                  ccm_cls_num = 4,
                  ):
@@ -121,24 +119,18 @@ class DeformableTransformer(nn.Module):
         else:
             raise NotImplementedError
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-
+        
         self.dynamic_query_list = dynamic_query_list
         self.CCM = CategoricalCounting(cls_num=self.ccm_cls_num)
         self.CGFE = CGFE(gate_channels=256, reduction_ratio=16, num_feature_levels=self.num_feature_levels)
         self.multiscale = MultiScaleFeature(is_5_scale=True)
-        from .dynamic_query import build_dynamic_query_module  # 文件顶部导入
-        self.use_dynamic_query = getattr(args, 'use_dynamic_query', False)
-        if self.use_dynamic_query:
-            # 构建动态查询模块
-            self.dynamic_query_module = build_dynamic_query_module(args)
-            print("✅ Dynamic Query Module initialized!")
-
+        
         self.encoder = TransformerEncoder(
-            encoder_layer, num_encoder_layers,
-            encoder_norm, d_model=d_model,
+            encoder_layer, num_encoder_layers, 
+            encoder_norm, d_model=d_model, 
             num_queries=num_queries,
-            deformable_encoder=deformable_encoder,
-            enc_layer_share=enc_layer_share,
+            deformable_encoder=deformable_encoder, 
+            enc_layer_share=enc_layer_share, 
             two_stage_type=two_stage_type
         )
 
@@ -157,11 +149,11 @@ class DeformableTransformer(nn.Module):
         decoder_norm = nn.LayerNorm(d_model)
         self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
                                         return_intermediate=return_intermediate_dec,
-                                        d_model=d_model, query_dim=query_dim,
+                                        d_model=d_model, query_dim=query_dim, 
                                         modulate_hw_attn=modulate_hw_attn,
                                         num_feature_levels=num_feature_levels,
                                         deformable_decoder=deformable_decoder,
-                                        decoder_query_perturber=decoder_query_perturber,
+                                        decoder_query_perturber=decoder_query_perturber, 
                                         dec_layer_number=dec_layer_number, rm_dec_query_scale=rm_dec_query_scale,
                                         dec_layer_share=dec_layer_share,
                                         use_detached_boxes_dec_out=use_detached_boxes_dec_out
@@ -181,7 +173,7 @@ class DeformableTransformer(nn.Module):
                 self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
             else:
                 self.level_embed = None
-
+        
         self.learnable_tgt_init = learnable_tgt_init
         assert learnable_tgt_init, "why not learnable_tgt_init"
         self.embed_init_tgt = embed_init_tgt
@@ -190,7 +182,7 @@ class DeformableTransformer(nn.Module):
             nn.init.normal_(self.tgt_embed.weight.data)
         else:
             self.tgt_embed = None
-
+            
         # for two stage
         self.two_stage_type = two_stage_type
         self.two_stage_pat_embed = two_stage_pat_embed
@@ -200,8 +192,8 @@ class DeformableTransformer(nn.Module):
         if two_stage_type =='standard':
             # anchor selection at the output of encoder
             self.enc_output = nn.Linear(d_model, d_model)
-            self.enc_output_norm = nn.LayerNorm(d_model)
-
+            self.enc_output_norm = nn.LayerNorm(d_model)      
+            
             if two_stage_pat_embed > 0:
                 self.pat_embed_for_2stage = nn.Parameter(torch.Tensor(two_stage_pat_embed, d_model))
                 nn.init.normal_(self.pat_embed_for_2stage)
@@ -243,8 +235,8 @@ class DeformableTransformer(nn.Module):
             assert isinstance(rm_detach, list)
             assert any([i in ['enc_ref', 'enc_tgt', 'dec'] for i in rm_detach])
         self.decoder.rm_detach = rm_detach
-
-
+        
+        
 
     def _reset_parameters(self):
         for p in self.parameters():
@@ -266,12 +258,11 @@ class DeformableTransformer(nn.Module):
         valid_ratio_h = valid_H.float() / H
         valid_ratio_w = valid_W.float() / W
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
-        # 🔥 [FIX] 防止除零：限制最小比例，避免产生 Inf
-        return valid_ratio.clamp(min=1e-6)
+        return valid_ratio
 
     def init_ref_points(self, use_num_queries):
         self.refpoint_embed = nn.Embedding(use_num_queries, 4)
-
+        
         if self.random_refpoints_xy:
 
             self.refpoint_embed.weight.data[:, :2].uniform_(0,1)
@@ -283,7 +274,7 @@ class DeformableTransformer(nn.Module):
         Input:
             - srcs: List of multi features [bs, ci, hi, wi]
             - masks: List of multi masks [bs, hi, wi]
-            - pos_embeds: List of multi pos embeds [bs, ci, hi, wi]
+            - pos_embeds: List of multi pos embeds [bs, ci, hi, wi]           
         """
         # prepare input for encoder
         src_flatten = []
@@ -304,9 +295,9 @@ class DeformableTransformer(nn.Module):
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
-        src_flatten = torch.cat(src_flatten, 1)    # bs, \sum{hxw}, c
+        src_flatten = torch.cat(src_flatten, 1)    # bs, \sum{hxw}, c 
         mask_flatten = torch.cat(mask_flatten, 1)   # bs, \sum{hxw}
-        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c
+        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c 
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
@@ -318,13 +309,13 @@ class DeformableTransformer(nn.Module):
         # Begin Encoder
         #########################################################
         memory, enc_intermediate_output, enc_intermediate_refpoints = self.encoder(
-                src_flatten,
-                pos=lvl_pos_embed_flatten,
-                level_start_index=level_start_index,
+                src_flatten, 
+                pos=lvl_pos_embed_flatten, 
+                level_start_index=level_start_index, 
                 spatial_shapes=spatial_shapes,
                 valid_ratios=valid_ratios,
                 key_padding_mask=mask_flatten,
-                ref_token_index=enc_topk_proposals, # bs, nq
+                ref_token_index=enc_topk_proposals, # bs, nq 
                 ref_token_coord=enc_refpoint_embed, # bs, nq, 4
                 )
         #########################################################
@@ -334,90 +325,22 @@ class DeformableTransformer(nn.Module):
         # - lvl_pos_embed_flatten: bs, \sum{hw}, c
         # - enc_intermediate_output: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         # - enc_intermediate_refpoints: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
-        #########################################################
-
+        #########################################################  
+        
         counting_output, ccm_feature = self.CCM(memory, spatial_shapes)
         multi_ccm_feature = self.multiscale(ccm_feature)
         cgfe_out = self.CGFE(multi_ccm_feature, memory, spatial_shapes)
-        memory = cgfe_out
-        if self.use_dynamic_query:
-            # 1. 提取真实目标数量（训练时）
-            if self.training and dn_targets is not None:
-                real_counts = torch.tensor(
-                    [len(t['labels']) for t in dn_targets],
-                    dtype=torch.long,
-                    device=memory.device
-                )
-            else:
-                real_counts = None
+        memory = cgfe_out        
+        _, predicted = torch.max(counting_output.data, 1)
+        num_select = self.dynamic_query_list[max(predicted.tolist())]
+        
 
-            # 2. 从memory中提取第一个尺度的特征（用于查询初始化）
-            # memory是拼接的多尺度特征: (BS, sum(H*W), 256)
-            # spatial_shapes: (num_levels, 2) 记录每个尺度的 [H, W]
-            bs = memory.shape[0]
+        tgt, refpoint_embed, attn_mask, dn_meta =\
+            prepare_for_cdn(dn_args=(dn_targets, args_dn[0], args_dn[1], args_dn[2]),
+                            training=args_dn[3], num_queries=num_select, num_classes=args_dn[4],
+                            hidden_dim=args_dn[5], label_enc=args_dn[6])
 
-            # 提取第一个尺度的特征
-            h_first, w_first = spatial_shapes[0].tolist()
-            encoder_feature_flat = memory[:, :h_first * w_first, :]  # (BS, H*W, 256)
-
-            # 恢复成2D特征图
-            encoder_feature = encoder_feature_flat.permute(0, 2, 1).reshape(
-                bs, 256, h_first, w_first
-            )  # (BS, 256, H, W)
-
-            # 3. 调用动态查询模块
-            dynamic_outputs = self.dynamic_query_module(
-                density_feature=ccm_feature,  # (BS, 256, H, W) CCM特征
-                encoder_feature=encoder_feature,  # (BS, 256, H, W) Encoder第一层特征
-                real_counts=real_counts,
-                training=self.training
-            )
-
-            # 4. 提取动态查询的输出
-            boundaries = dynamic_outputs['boundaries']  # (BS, 3)
-            num_queries_dynamic = dynamic_outputs['num_queries']  # (BS,)
-            reference_points_init = dynamic_outputs['reference_points']  # (BS, max_K, 4)
-            quality_scores = dynamic_outputs['quality_scores']  # (BS, max_K)
-
-            # 5. 使用动态查询数量（取batch中的最大值）
-            num_select = num_queries_dynamic.max().item()
-
-            # 保存用于损失计算
-            self._dynamic_outputs = dynamic_outputs
-        else:
-            # 原始逻辑
-            _, predicted = torch.max(counting_output.data, 1)
-            num_select = self.dynamic_query_list[max(predicted.tolist())]
-            reference_points_init = None
-
-
-        # tgt, refpoint_embed, attn_mask, dn_meta =\
-        #     prepare_for_cdn(dn_args=(dn_targets, args_dn[0], args_dn[1], args_dn[2]),
-        #                     training=args_dn[3], num_queries=num_select, num_classes=args_dn[4],
-        #                     hidden_dim=args_dn[5], label_enc=args_dn[6])
-        if self.use_dynamic_query and reference_points_init is not None:
-            # 使用动态初始化的参考点
-            tgt, refpoint_embed, attn_mask, dn_meta = prepare_for_cdn(
-                dn_args=(dn_targets, args_dn[0], args_dn[1], args_dn[2]),
-                training=args_dn[3],
-                num_queries=num_select,
-                num_classes=args_dn[4],
-                hidden_dim=args_dn[5],
-                label_enc=args_dn[6],
-                initial_reference_points=reference_points_init  # 🔥传入动态参考点
-            )
-        else:
-            # 原始逻辑
-            tgt, refpoint_embed, attn_mask, dn_meta = prepare_for_cdn(
-                dn_args=(dn_targets, args_dn[0], args_dn[1], args_dn[2]),
-                training=args_dn[3],
-                num_queries=num_select,
-                num_classes=args_dn[4],
-                hidden_dim=args_dn[5],
-                label_enc=args_dn[6],
-                initial_reference_points=Non
-            )
-
+        
         if self.two_stage_type =='standard':
             # decide query hw
             if self.two_stage_learn_wh:
@@ -427,11 +350,11 @@ class DeformableTransformer(nn.Module):
 
             output_memory, output_proposals = gen_encoder_output_proposals(memory, mask_flatten, spatial_shapes, input_hw)
             output_memory = self.enc_output_norm(self.enc_output(output_memory))
-
+            
             if self.two_stage_pat_embed > 0:
                 bs, nhw, _ = output_memory.shape
                 output_memory = output_memory.repeat(1, self.two_stage_pat_embed, 1)
-                _pats = self.pat_embed_for_2stage.repeat_interleave(nhw, 0)
+                _pats = self.pat_embed_for_2stage.repeat_interleave(nhw, 0) 
                 output_memory = output_memory + _pats
                 output_proposals = output_proposals.repeat(1, self.two_stage_pat_embed, 1)
 
@@ -442,44 +365,19 @@ class DeformableTransformer(nn.Module):
 
             enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
             enc_outputs_coord_unselected = self.enc_out_bbox_embed(output_memory) + output_proposals # (bs, \sum{hw}, 4) unsigmoid
-
+            
 
             topk = num_select
             topk_proposals = torch.topk(enc_outputs_class_unselected.max(-1)[0], topk, dim=1)[1] # bs, nq
 
             # gather boxes
-            # 🔥 使用动态初始化的参考点
-            #BS = memory.shape[0]
-            refpoint_embed_undetach = torch.gather(enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4))  # unsigmoid
-            # refpoint_embed_ = refpoint_embed_undetach.detach()
-
-            if reference_points_init is not None:
-                # 🔥 [FIX 2] 动态查询路径修复
-                # reference_points_init 是归一化的 (0-1)，形状 (BS, max_K, 4)
-                # 我们需要截取前 topk 个，并转换为 unsigmoid 格式传给解码器
-                valid_k = min(topk, reference_points_init.shape[1])
-
-                # 1. 截取并 Detach
-                dq_points_sigmoid = reference_points_init[:, :valid_k, :].detach()
-
-                # 2. 这里的 refpoint_embed_ 必须是 Inverse Sigmoid 后的值！
-                #    先 clamp 防止 logit 出现 Inf
-                dq_points_sigmoid = dq_points_sigmoid.clamp(min=0.05, max=0.95)
-                # 3. 转换为 unsigmoid 格式（logit）
-                refpoint_embed_ = inverse_sigmoid(dq_points_sigmoid)
-                # 4. 🔥 额外保护：限制 logit 范围，防止极值
-                refpoint_embed_ = refpoint_embed_.clamp(min=-2.5, max=2.5)
-                # 5. init_box_proposal 用于监督，应该是 sigmoid 后的值
-                init_box_proposal = dq_points_sigmoid
-            else:
-                # 原始逻辑
-                refpoint_embed_ = refpoint_embed_undetach.detach()
-                init_box_proposal = torch.gather(output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)).sigmoid()  # sigmoid
+            refpoint_embed_undetach = torch.gather(enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)) # unsigmoid
+            refpoint_embed_ = refpoint_embed_undetach.detach()
+            init_box_proposal = torch.gather(output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)).sigmoid() # sigmoid
 
             # gather tgt
             tgt_undetach = torch.gather(output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model))
             if self.embed_init_tgt:
-                # 此处修改了BS
                 tgt_ = self.tgt_embed.weight[0:topk, None, :].repeat(1, bs, 1).transpose(0, 1)  # nq, bs, d_model
             else:
                 tgt_ = tgt_undetach.detach()
@@ -491,8 +389,6 @@ class DeformableTransformer(nn.Module):
                 refpoint_embed,tgt=refpoint_embed_,tgt_
 
         elif self.two_stage_type == 'no':
-            # BS的问题
-            # BS = memory.shape[0]
             tgt_ = self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, d_model
             refpoint_embed_ = self.refpoint_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, 4
 
@@ -512,17 +408,17 @@ class DeformableTransformer(nn.Module):
 
         else:
             raise NotImplementedError("unknown two_stage_type {}".format(self.two_stage_type))
-
-
+        
+        
         #########################################################
         # Begin Decoder
         hs, references = self.decoder(
-                tgt=tgt.transpose(0, 1),
-                memory=memory.transpose(0, 1),
-                memory_key_padding_mask=mask_flatten,
+                tgt=tgt.transpose(0, 1),  
+                memory=memory.transpose(0, 1), 
+                memory_key_padding_mask=mask_flatten, 
                 pos=lvl_pos_embed_flatten.transpose(0, 1),
                 refpoints_unsigmoid=refpoint_embed.transpose(0, 1),
-                level_start_index=level_start_index,
+                level_start_index=level_start_index, 
                 spatial_shapes=spatial_shapes,
                 valid_ratios=valid_ratios,tgt_mask=attn_mask)
         #########################################################
@@ -533,7 +429,7 @@ class DeformableTransformer(nn.Module):
 
         #########################################################
         # Begin postprocess
-        #########################################################
+        #########################################################     
         if self.two_stage_type == 'standard':
             if self.two_stage_keep_all_tokens:
                 hs_enc = output_memory.unsqueeze(0)
@@ -550,24 +446,11 @@ class DeformableTransformer(nn.Module):
         # End postprocess
         # hs_enc: (n_enc+1, bs, nq, d_model) or (1, bs, nq, d_model) or (n_enc, bs, nq, d_model) or None
         # ref_enc: (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or (n_enc, bs, nq, d_model) or None
-        #########################################################
+        #########################################################        
 
 
-
-        # return hs, references, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select
-        dynamic_info = None
-        if self.use_dynamic_query:
-            dynamic_info = {
-                'boundaries': boundaries,
-                'interval_probs': dynamic_outputs.get('interval_probs', None),
-                'num_queries': num_queries_dynamic,
-                'quality_scores': quality_scores,
-                'raw_boundaries': dynamic_outputs['raw_boundaries']
-            }
-
-        return hs, references, hs_enc, ref_enc, init_box_proposal, dn_meta, \
-            counting_output, num_select, dynamic_info  # 🔥 新增返回值
-
+        
+        return hs, references, hs_enc, ref_enc, init_box_proposal, dn_meta, counting_output, num_select
         # hs: (n_dec, bs, nq, d_model)
         # references: sigmoid coordinates. (n_dec+1, bs, bq, 4)
         # hs_enc: (n_enc+1, bs, nq, d_model) or (1, bs, nq, d_model) or None
@@ -577,11 +460,11 @@ class DeformableTransformer(nn.Module):
 
 class TransformerEncoder(nn.Module):
 
-    def __init__(self,
-        encoder_layer, num_layers, norm=None, d_model=256,
+    def __init__(self, 
+        encoder_layer, num_layers, norm=None, d_model=256, 
         num_queries=300,
-        deformable_encoder=False,
-        enc_layer_share=False, enc_layer_dropout_prob=None,
+        deformable_encoder=False, 
+        enc_layer_share=False, enc_layer_dropout_prob=None,                  
         two_stage_type='no',  # ['no', 'standard', 'early', 'combine', 'enceachlayer', 'enclayer1']
     ):
         super().__init__()
@@ -615,7 +498,7 @@ class TransformerEncoder(nn.Module):
                 self.enc_proj = nn.ModuleList([_proj_layer])
             else:
                 self.enc_norm = nn.ModuleList([copy.deepcopy(_norm_layer) for i in range(num_layers - 1) ])
-                self.enc_proj = nn.ModuleList([copy.deepcopy(_proj_layer) for i in range(num_layers - 1) ])
+                self.enc_proj = nn.ModuleList([copy.deepcopy(_proj_layer) for i in range(num_layers - 1) ]) 
 
     @staticmethod
     def get_reference_points(spatial_shapes, valid_ratios, device):
@@ -632,12 +515,12 @@ class TransformerEncoder(nn.Module):
         reference_points = reference_points[:, :, None] * valid_ratios[:, None]
         return reference_points
 
-    def forward(self,
+    def forward(self, 
             src: Tensor,
-            pos: Tensor,
-            spatial_shapes: Tensor,
-            level_start_index: Tensor,
-            valid_ratios: Tensor,
+            pos: Tensor, 
+            spatial_shapes: Tensor, 
+            level_start_index: Tensor, 
+            valid_ratios: Tensor, 
             key_padding_mask: Tensor,
             ref_token_index: Optional[Tensor]=None,
             ref_token_coord: Optional[Tensor]=None
@@ -1040,7 +923,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
                 self_attn_mask: Optional[Tensor] = None, # mask used for self-attention
                 cross_attn_mask: Optional[Tensor] = None, # mask used for cross-attention
             ):
-
+            
         # self attention
         if self.self_attn is not None:
             if self.decoder_sa_type == 'sa':
@@ -1163,7 +1046,6 @@ def build_deformable_transformer(args):
         use_detached_boxes_dec_out =False
 
     return DeformableTransformer(
-        args,  # 确保将args传入
         d_model=args.hidden_dim,
         dropout=args.dropout,
         nhead=args.nheads,

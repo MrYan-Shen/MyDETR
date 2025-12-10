@@ -17,12 +17,8 @@ from util import box_ops
 import torch.nn.functional as F
 
 
-def prepare_for_cdn(dn_args, training, num_queries, num_classes, hidden_dim, label_enc
-                    ,initial_reference_points=None):  # 🔥 新增参数
+def prepare_for_cdn(dn_args, training, num_queries, num_classes, hidden_dim, label_enc):
     """
-        新增参数:
-        initial_reference_points: (BS, num_queries, 4) - 动态查询初始化的参考点
-
         A major difference of DINO from DN-DETR is that the author process pattern embedding pattern embedding in its detector
         forward function and use learnable tgt embedding, so we change this function a little bit.
         :param dn_args: targets, dn_number, label_noise_ratio, box_noise_scale
@@ -101,66 +97,6 @@ def prepare_for_cdn(dn_args, training, num_queries, num_classes, hidden_dim, lab
 
         padding_label = torch.zeros(pad_size, hidden_dim).cuda()
         padding_bbox = torch.zeros(pad_size, 4).cuda()
-
-        # 🔥 关键修复：处理 initial_reference_points
-        # DN 查询的参考点来源优先级：
-        # 1. 如果有动态查询初始化的参考点，优先使用
-        # 2. 否则使用全零填充
-        if initial_reference_points is not None:
-            # 🔥 使用动态查询的参考点作为 DN 查询的基础
-            # initial_reference_points: (BS, num_queries, 4)
-            # 我们需要为每个 batch 提取对应数量的参考点
-            try:
-                for b in range(batch_size):
-                    if b < initial_reference_points.shape[0]:
-                        # 提取该 batch 的参考点，取前 single_pad 个
-                        num_to_copy = min(single_pad * 2 * dn_number,
-                                        initial_reference_points.shape[1])
-                        if num_to_copy > 0:
-                            # 转换为 unsigmoid 格式
-                            ref_points_sigmoid = initial_reference_points[b, :num_to_copy, :].clamp(0.05, 0.95)
-                            ref_points_unsigmoid = inverse_sigmoid(ref_points_sigmoid)
-                            padding_bbox[:num_to_copy] = ref_points_unsigmoid
-            except Exception as e:
-                print(f"⚠️ Warning: Failed to use initial_reference_points in DN: {e}")
-                # 失败时回退到全零
-                padding_bbox = torch.zeros(pad_size, 4).cuda()
-
-            for b in range(batch_size):
-                if b >= initial_reference_points.shape[0]:
-                    continue
-
-                # 正样本：使用质量最高的参考点
-                num_positive = min(single_pad * dn_number, initial_reference_points.shape[1])
-                if num_positive > 0:
-                    ref_points = initial_reference_points[b, :num_positive, :].clamp(0.05, 0.95)
-                    ref_unsigmoid = inverse_sigmoid(ref_points).clamp(-2.5, 2.5)
-
-                    # 为正样本位置赋值
-                    for dn_group in range(dn_number):
-                        start_idx = single_pad * 2 * dn_group
-                        end_idx = start_idx + single_pad
-                        actual_copy = min(single_pad, num_positive)
-                        padding_bbox[start_idx:start_idx + actual_copy] = ref_unsigmoid[:actual_copy]
-
-                # 策略：对于 DN 查询，我们希望：
-                # 1. 正样本（前 single_pad * dn_number 个）使用动态初始化点
-                # 2. 负样本（后 single_pad * dn_number 个）也使用动态点，但添加更大噪声
-                # 负样本：使用相同的点但添加随机偏移
-                num_negative = min(single_pad * dn_number, initial_reference_points.shape[1])
-                if num_negative > 0:
-                    ref_points = initial_reference_points[b, :num_negative, :].clamp(0.05, 0.95)
-                    # 添加更大的噪声来创建困难负样本
-                    noise = torch.randn_like(ref_points) * 0.3
-                    ref_points_noisy = (ref_points + noise).clamp(0.05, 0.95)
-                    ref_unsigmoid = inverse_sigmoid(ref_points_noisy).clamp(-2.5, 2.5)
-
-                    # 为负样本位置赋值
-                    for dn_group in range(dn_number):
-                        start_idx = single_pad * (2 * dn_group + 1)
-                        end_idx = start_idx + single_pad
-                        actual_copy = min(single_pad, num_negative)
-                        padding_bbox[start_idx:start_idx + actual_copy] = ref_unsigmoid[:actual_copy]
 
         input_query_label = padding_label.repeat(batch_size, 1, 1)
         input_query_bbox = padding_bbox.repeat(batch_size, 1, 1)

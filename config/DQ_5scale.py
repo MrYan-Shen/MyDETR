@@ -18,7 +18,7 @@ onecyclelr = False  # 是否使用OneCycle学习率调度器
 multi_step_lr = True  # 是否使用多步长学习率调度器
 lr_drop_list = [13, 23]  # 多步长调度器下，学习率下降的轮次列表
 val_epoch = [0]  # 指定在哪些轮次后进行验证
-# dataset_file='aitod_v2'
+# dataset_file='aitod_v1'
 
 # 分类阈值
 ccm_params = [10, 100, 500]
@@ -116,13 +116,3 @@ ema_epoch = 0
 
 use_detached_boxes_dec_out = False
 
-# 🔥 动态查询机制参数
-use_dynamic_query = True  # 启用动态查询
-num_boundaries = 3  # 边界数量
-max_objects = 1500  # 最大目标数量
-dynamic_query_levels = [300, 500, 900, 1500]  # 四个查询等级
-initial_smoothness = 1.0  # 初始平滑系数
-
-# 损失权重
-loss_interval_coef = 1.0  # 区间分类损失权重
-loss_boundary_coef = 0.01  # 边界L2正则化权重

@@ -66,25 +66,12 @@ class HungarianMatcher(nn.Module):
         bs, num_queries = outputs["pred_logits"].shape[:2]
 
         # We flatten to compute the cost matrices in a batch
-        # 核心修复1：清理 pred_logits 和 pred_boxes 中的异常值
-        out_prob = outputs["pred_logits"].flatten(0, 1)  # [batch_size * num_queries, num_classes]
+        out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()  # [batch_size * num_queries, num_classes]
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
-
-        # 修复 logits（防止 sigmoid 后变成 NaN）
-        out_prob = torch.nan_to_num(out_prob, nan=0.0, posinf=10.0, neginf=-10.0)
-        out_prob = out_prob.clamp(min=-10.0, max=10.0).sigmoid()
-
-        # 修复 boxes（确保在 [0,1] 范围内）
-        out_bbox = torch.nan_to_num(out_bbox, nan=0.5, posinf=1.0, neginf=0.0)
-        out_bbox = out_bbox.clamp(min=0.0, max=1.0)
 
         # Also concat the target labels and boxes
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
-
-        # 核心修复2：也要清理目标框（防止标注错误）
-        tgt_bbox = torch.nan_to_num(tgt_bbox, nan=0.5, posinf=1.0, neginf=0.0)
-        tgt_bbox = tgt_bbox.clamp(min=0.0, max=1.0)
 
         # Compute the classification cost.
         alpha = self.focal_alpha
@@ -95,32 +82,12 @@ class HungarianMatcher(nn.Module):
 
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
-
-        # 核心修复3：安全计算 GIoU（使用修复后的 box_ops）
-        try:
-            cost_giou = -generalized_box_iou(
-                box_cxcywh_to_xyxy(out_bbox),
-                box_cxcywh_to_xyxy(tgt_bbox)
-            )
-            # 最终检查：如果 cost_giou 仍有异常，替换为安全值
-            if torch.isnan(cost_giou).any() or torch.isinf(cost_giou).any():
-                print("  Warning: cost_giou has NaN/Inf after box_ops, using fallback")
-                cost_giou = torch.zeros_like(cost_bbox)  # 降级：忽略 GIoU 代价
-        except Exception as e:
-            print(f"  Warning: GIoU calculation failed: {e}, using fallback")
-            cost_giou = torch.zeros_like(cost_bbox)
-
+            
         # Compute the giou cost betwen boxes            
-        # cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
         # Final cost matrix
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-
-        #  核心修复4：最终安全检查
-        if torch.isnan(C).any() or torch.isinf(C).any():
-            print("⚠  Critical: Cost matrix C has NaN/Inf, applying emergency fix")
-            C = torch.nan_to_num(C, nan=1e6, posinf=1e6, neginf=-1e6)
-
         C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
@@ -172,22 +139,12 @@ class SimpleMinsumMatcher(nn.Module):
         bs, num_queries = outputs["pred_logits"].shape[:2]
 
         # We flatten to compute the cost matrices in a batch
-        out_prob = outputs["pred_logits"].flatten(0, 1) # [batch_size * num_queries, num_classes]
+        out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()  # [batch_size * num_queries, num_classes]
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
-
-        # 应用相同的清理逻辑
-        out_prob = torch.nan_to_num(out_prob, nan=0.0, posinf=10.0, neginf=-10.0)
-        out_prob = out_prob.clamp(min=-10.0, max=10.0).sigmoid()
-
-        out_bbox = torch.nan_to_num(out_bbox, nan=0.5, posinf=1.0, neginf=0.0)
-        out_bbox = out_bbox.clamp(min=0.0, max=1.0)
 
         # Also concat the target labels and boxes
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
-
-        tgt_bbox = torch.nan_to_num(tgt_bbox, nan=0.5, posinf=1.0, neginf=0.0)
-        tgt_bbox = tgt_bbox.clamp(min=0.0, max=1.0)
 
         # Compute the classification cost.
         alpha = self.focal_alpha
@@ -198,26 +155,12 @@ class SimpleMinsumMatcher(nn.Module):
 
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
-
-        try:
-            cost_giou = -generalized_box_iou(
-                box_cxcywh_to_xyxy(out_bbox),
-                box_cxcywh_to_xyxy(tgt_bbox)
-            )
-            if torch.isnan(cost_giou).any() or torch.isinf(cost_giou).any():
-                cost_giou = torch.zeros_like(cost_bbox)
-        except:
-            cost_giou = torch.zeros_like(cost_bbox)
-
+            
         # Compute the giou cost betwen boxes            
-        # cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
         # Final cost matrix
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-
-        if torch.isnan(C).any() or torch.isinf(C).any():
-            C = torch.nan_to_num(C, nan=1e6, posinf=1e6, neginf=-1e6)
-
         C = C.view(bs, num_queries, -1)
 
         sizes = [len(v["boxes"]) for v in targets]
