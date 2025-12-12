@@ -43,7 +43,7 @@ class DQDETR(nn.Module):
                     fix_refpoints_hw=-1,
                     num_feature_levels=1,
                     nheads=8,
-                    # two stage
+                    # two stage, 控制是否使用两阶段
                     two_stage_type='no', # ['no', 'standard']
                     two_stage_add_query_num=0,
                     dec_pred_class_embed_share=True,
@@ -356,7 +356,10 @@ class SetCriterion(nn.Module):
 
     计算损失的模块，使用 1. 匈牙利匹配分配目标和预测 2. 监督匹配队
     """
-    def __init__(self, num_classes, matcher, weight_dict, focal_alpha, losses):
+    def __init__(self, num_classes, matcher, weight_dict, focal_alpha, losses,
+                 # [新增参数]
+                 dq_query_levels=[300, 500, 900, 1500]
+                 ):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -371,6 +374,7 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.losses = losses
         self.focal_alpha = focal_alpha
+        self.dq_query_levels = dq_query_levels
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
@@ -536,6 +540,47 @@ class SetCriterion(nn.Module):
 
         # prepare for dn loss
         dn_meta = outputs['dn_meta']
+        # 仅在训练且存在 dq_outputs 时计算
+        if self.training and dn_meta is not None and 'dq_outputs' in dn_meta:
+            dq_outputs = dn_meta['dq_outputs']
+
+            # 1. 准备数据
+            interval_probs = dq_outputs['interval_probs']  # [BS, 4] 预测的概率分布
+            raw_boundaries = dq_outputs['raw_boundaries']  # [BS, 3] 原始边界输出
+            real_counts = dn_meta['real_counts']  # [BS] 真实目标数量
+
+            if interval_probs is not None and real_counts is not None:
+                # 2. 生成分类 Ground Truth
+                # 根据真实数量 Nreal 落在哪个预设区间，确定 label
+                # levels: [300, 500, 900, 1500] -> 区间: <=300, 300-500, 500-900, >900
+                # 实际上 dynamic_query.py 中的逻辑是根据 learnable boundaries 分配概率
+                # 这里我们使用真实数量所在的 "理想" 区间作为监督信号
+
+                # 定义区间阈值 (对应 query_levels)
+                # Level 0: <= 300
+                # Level 1: 300 < N <= 500
+                # Level 2: 500 < N <= 900
+                # Level 3: > 900
+                levels = self.dq_query_levels
+                target_labels = torch.zeros_like(real_counts, dtype=torch.long)
+
+                # 向量化生成标签
+                target_labels[real_counts > levels[0]] = 1
+                target_labels[real_counts > levels[1]] = 2
+                target_labels[real_counts > levels[2]] = 3
+
+                # 3. 计算交叉熵损失 (Cross Entropy Loss)
+                # interval_probs 是 softmax 后的或 sigmoid 处理过的概率
+                # 加 1e-6 防止 log(0)
+                loss_dq_ce = F.nll_loss(torch.log(interval_probs + 1e-6), target_labels)
+
+                # 4. 计算 L2 正则化损失 (L2 Regularization)
+                # 防止边界预测值过大或不稳定
+                loss_dq_l2 = torch.mean(raw_boundaries ** 2)
+
+                # 5. 更新 losses 字典
+                losses['loss_dq_ce'] = loss_dq_ce
+                losses['loss_dq_l2'] = loss_dq_l2
 
         # 2. Denoising (DN) 损失计算
         if self.training and dn_meta and 'output_known_lbs_bboxes' in dn_meta:
@@ -876,7 +921,20 @@ def build_dqdetr(args):
     # 7. 构建损失准则 (Criterion)
     criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict,
                              focal_alpha=args.focal_alpha, losses=losses,
+                             # [新增] 传递 query levels
+                             dq_query_levels=args.dynamic_query_levels
                              )
+    # [新增] 添加新损失的权重到 weight_dict
+    if hasattr(args, 'dq_ce_loss_coef'):
+        weight_dict['loss_dq_ce'] = args.dq_ce_loss_coef
+    else:
+        weight_dict['loss_dq_ce'] = 1.0  # 默认值
+
+    if hasattr(args, 'dq_l2_loss_coef'):
+        weight_dict['loss_dq_l2'] = args.dq_l2_loss_coef
+    else:
+        weight_dict['loss_dq_l2'] = 0.5  # 默认值
+
     criterion.to(device)
     # 8. 构建后处理器 (PostProcessors)
     postprocessors = {'bbox': PostProcess(nms_iou_threshold=args.nms_iou_threshold)}

@@ -25,6 +25,7 @@ from .dn_components import prepare_for_cdn,dn_post_process
 
 from .ccm import CategoricalCounting
 from .cgfe import CGFE, MultiScaleFeature
+from .dynamic_query import DynamicQueryModule # 导入新模块
 
 
 class DeformableTransformer(nn.Module):
@@ -77,6 +78,11 @@ class DeformableTransformer(nn.Module):
                  
                  dynamic_query_list = None,
                  ccm_cls_num = 4,
+
+                 num_boundaries=3,
+                 max_objects=1500,
+                 dynamic_query_levels=[300, 500, 900, 1500],
+                 initial_smoothness=1.0
                  ):
         super().__init__()
         self.num_feature_levels = num_feature_levels
@@ -90,6 +96,13 @@ class DeformableTransformer(nn.Module):
         self.random_refpoints_xy = random_refpoints_xy
         self.use_detached_boxes_dec_out = use_detached_boxes_dec_out
         self.ccm_cls_num = ccm_cls_num
+        self.dynamic_query_module = DynamicQueryModule(
+            feature_dim=d_model,
+            num_boundaries=num_boundaries,
+            max_objects=max_objects,
+            query_levels=dynamic_query_levels,
+            initial_smoothness = initial_smoothness
+        )
         assert query_dim == 4
 
         if num_feature_levels > 1:
@@ -330,7 +343,40 @@ class DeformableTransformer(nn.Module):
         counting_output, ccm_feature = self.CCM(memory, spatial_shapes)
         multi_ccm_feature = self.multiscale(ccm_feature)
         cgfe_out = self.CGFE(multi_ccm_feature, memory, spatial_shapes)
-        memory = cgfe_out        
+        memory = cgfe_out
+
+        # 2. 获取真实目标数量 (仅训练时用于边界学习)
+        real_counts = None
+        if self.training and dn_targets is not None:
+            # dn_targets 是 targets 列表
+            real_counts = torch.tensor([len(t['labels']) for t in dn_targets],
+                                       device=memory.device, dtype=torch.float)
+        # 3. 执行动态查询模块
+        # ccm_feature: [BS, C, H, W]
+        # memory (reshaped internally in module if needed): [BS, HW, C] -> [BS, C, H, W]
+        # 注意：DynamicQueryModule 需要 encoder_features 为 [BS, C, H, W] 格式
+        # memory 是 flattened 的，我们需要 ccm_feature (未 flatten) 或者将 memory reshape
+        dq_outputs = self.dynamic_query_module(
+            density_feature=ccm_feature,
+            encoder_features=ccm_feature,  # 使用 CCM 特征作为空间特征
+            real_counts=real_counts,
+        )
+        # 4. 确定当前 Batch 的最大查询数量
+        # dq_outputs['num_queries'] 是一个 tensor [BS]，每个 batch 可能不同
+        # 为了并行计算，我们取 batch 中的最大值作为 num_select
+        batch_num_queries = dq_outputs['num_queries']
+        num_select = batch_num_queries.max().item()
+
+        # --- 添加打印代码 ---
+        # print(f"\n[DEBUG] Current Batch Max Queries: {num_select}")
+        # print(f"[DEBUG] Predicted Boundaries: {dq_outputs['pred_boundaries'][0].detach().cpu().numpy()}")
+        # print(f"[DEBUG] Real Counts (if training): {real_counts}")
+
+        # 5. 获取参考点和初始化框
+        # dq_outputs['reference_points']: [BS, max_K, 4]
+        # 我们只需要取前 num_select 个 (模块已处理好 padding)
+        refpoint_embed_dynamic = dq_outputs['reference_points'][:, :num_select, :]
+
         _, predicted = torch.max(counting_output.data, 1)
         num_select = self.dynamic_query_list[max(predicted.tolist())]
         
@@ -389,8 +435,28 @@ class DeformableTransformer(nn.Module):
                 refpoint_embed,tgt=refpoint_embed_,tgt_
 
         elif self.two_stage_type == 'no':
-            tgt_ = self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, d_model
-            refpoint_embed_ = self.refpoint_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, 4
+            bs = memory.shape[0]
+            # 使用动态生成的参考点
+            refpoint_embed_ = inverse_sigmoid(refpoint_embed_dynamic)
+            tgt_ = self.tgt_embed.weight[:num_select].unsqueeze(1).repeat(1, bs, 1).transpose(0, 1)
+            init_box_proposal = refpoint_embed_dynamic
+            # 6. 准备 DN (Denoising)
+            tgt, refpoint_embed, attn_mask, dn_meta = prepare_for_cdn(
+                dn_args=(dn_targets, args_dn[0], args_dn[1], args_dn[2]),
+                training=args_dn[3],
+                num_queries=num_select,
+                num_classes=args_dn[4],
+                hidden_dim=args_dn[5],
+                label_enc=args_dn[6]
+            )
+
+            # 将动态查询的输出存入 dn_meta，传递给 Loss
+            if dn_meta is None: dn_meta = {}
+            dn_meta['dq_outputs'] = dq_outputs
+            dn_meta['real_counts'] = real_counts
+
+            # tgt_ = self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, d_model
+            # refpoint_embed_ = self.refpoint_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, 4
 
             if refpoint_embed is not None:
                 refpoint_embed=torch.cat([refpoint_embed,refpoint_embed_],dim=1)
@@ -465,6 +531,7 @@ class TransformerEncoder(nn.Module):
         num_queries=300,
         deformable_encoder=False, 
         enc_layer_share=False, enc_layer_dropout_prob=None,                  
+        # 控制是否使用两阶段模型
         two_stage_type='no',  # ['no', 'standard', 'early', 'combine', 'enceachlayer', 'enclayer1']
     ):
         super().__init__()
