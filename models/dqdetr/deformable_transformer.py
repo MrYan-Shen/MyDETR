@@ -1547,7 +1547,8 @@ class DeformableTransformer(nn.Module):
             # 打印格式：[真实值] vs [预测值] -> [选择的查询数量]
             # 如果是训练阶段，你应该看到选择的查询数量与真实值更相关
             rc_str = str(real_counts.long().tolist()) if real_counts is not None else "None"
-            pc_str = str(pred_count.detach().cpu().long().tolist())
+            pc_list = pred_count.detach().cpu().tolist()
+            pc_str = "[" + ", ".join([f"{x:.2f}" for x in pc_list]) + "]"
             print(f"\n[DQ DEBUG] GT:{rc_str} vs Pred:{pc_str} => Queries:{num_select}")
             print(f"[DQ DEBUG] Boundaries: {dq_outputs['pred_boundaries'][0].detach().cpu().numpy()}")
 

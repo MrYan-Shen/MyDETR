@@ -134,3 +134,4 @@ initial_smoothness = 1.0
 # 损失函数权重
 dq_ce_loss_coef = 1.0  # 边界预测交叉熵损失权重
 dq_l2_loss_coef = 0.5  # 边界预测 L2 正则化权重
+dq_reg_loss_coef = 5.0  # 数量回归损失权重，建议设大一点，让它快速收敛

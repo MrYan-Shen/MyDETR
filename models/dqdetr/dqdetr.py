@@ -1373,26 +1373,39 @@ class SetCriterion(nn.Module):
             interval_probs = dq_outputs.get('interval_probs')
             raw_boundaries = dq_outputs.get('raw_boundaries')
             real_counts = dn_meta.get('real_counts')
+            pred_count = dq_outputs.get('predicted_count')  # [新增]
 
             # 1. 即使没有 real_counts，也要计算 L2 Loss（只要有 raw_boundaries）
             if raw_boundaries is not None:
                 loss_dq_l2 = torch.mean(raw_boundaries ** 2)
                 losses['loss_dq_l2'] = loss_dq_l2
-            else:
-                if is_main_process(): print("[Diagnostic] ERROR: raw_boundaries is None!")
+
 
             # 2. 如果有 real_counts 和 probs，计算 CE Loss
-            if interval_probs is not None and real_counts is not None:
-                levels = self.dq_query_levels
-                target_labels = torch.zeros_like(real_counts, dtype=torch.long)
+            if real_counts is not None:
+                if pred_count is not None:
+                    # 归一化因子，避免大数量时的 Loss 过大
+                    # 预测值和真实值都取 log，关注相对误差而不是绝对误差
+                    # 比如预测 2 vs 真实 4 (误差大)，预测 100 vs 102 (误差小)
+                    loss_dq_reg = F.smooth_l1_loss(
+                        torch.log1p(pred_count),
+                        torch.log1p(real_counts.float()),
+                        beta=1.0
+                    )
+                    losses['loss_dq_reg'] = loss_dq_reg
 
-                # 向量化生成标签
-                target_labels[real_counts > levels[0]] = 1
-                target_labels[real_counts > levels[1]] = 2
-                target_labels[real_counts > levels[2]] = 3
+                # B. 计算分类损失
+                if interval_probs is not None:
+                    levels = self.dq_query_levels
+                    target_labels = torch.zeros_like(real_counts, dtype=torch.long)
 
-                loss_dq_ce = F.nll_loss(torch.log(interval_probs + 1e-6), target_labels)
-                losses['loss_dq_ce'] = loss_dq_ce
+                    # 向量化生成标签
+                    target_labels[real_counts > levels[0]] = 1
+                    target_labels[real_counts > levels[1]] = 2
+                    target_labels[real_counts > levels[2]] = 3
+
+                    loss_dq_ce = F.nll_loss(torch.log(interval_probs + 1e-6), target_labels)
+                    losses['loss_dq_ce'] = loss_dq_ce
 
             # [Diagnostic] Check failure reason
             # else:
@@ -1620,6 +1633,9 @@ def build_dqdetr(args):
         weight_dict['loss_dq_l2'] = args.dq_l2_loss_coef
     else:
         weight_dict['loss_dq_l2'] = 0.5  # 默认值
+
+    # [新增] 回归损失权重
+    weight_dict['loss_dq_reg'] = getattr(args, 'dq_reg_loss_coef', 2.0)  # 给予较高的权
 
     clean_weight_dict_wo_dn = copy.deepcopy(weight_dict)
 
