@@ -70,6 +70,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             ccm_loss = CCM_LOSS(outputs['pred_bbox_number'], ccm_targets)
             losses += ccm_coeff * ccm_loss
 
+            # [Debug] 检查 Loss Keys
+            if _cnt % 100 == 0 and utils.is_main_process():
+                keys_in_loss = [k for k in loss_dict.keys() if 'dq' in k]
+                print(f"[DEBUG Engine] Current Step {_cnt}, DQ Losses found: {keys_in_loss}")
+
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
@@ -88,16 +93,16 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             sys.exit(1)
 
         # --- 添加检查代码 ---
-        # if _cnt % 100 == 0 and utils.is_main_process():  # 每100个batch检查一次
-        #     for name, param in model.named_parameters():
-        #         if "dynamic_query_module" in name and param.requires_grad:
-        #             if param.grad is not None:
-        #                 grad_mean = param.grad.abs().mean().item()
-        #                 print(f"[Grad Check] {name}: {grad_mean:.6f}")
-        #             else:
-        #                 print(f"[Grad Check] ❌ {name} bas NO GRADIENT!")
-        #             break  # 只检查第一个参数即可证明
-        # # ------------------
+        if _cnt % 100 == 0 and utils.is_main_process():  # 每100个batch检查一次
+            for name, param in model.named_parameters():
+                if "dynamic_query_module" in name and param.requires_grad:
+                    if param.grad is not None:
+                        grad_mean = param.grad.abs().mean().item()
+                        print(f"[Grad Check] {name}: {grad_mean:.6f}")
+                    else:
+                        print(f"[Grad Check] ❌ {name} bas NO GRADIENT!")
+                    break  # 只检查第一个参数即可证明
+        # ------------------
 
         # amp backward function
         if args.amp:
