@@ -116,9 +116,9 @@ ema_epoch = 0
 
 use_detached_boxes_dec_out = False
 
+# for 动态查询模块参数
 # 边界数量 (对应3个边界 -> 4个区间)
 num_boundaries = 3
-
 # 场景中假设的最大目标数量 Nmax (用于 Softplus 缩放)
 max_objects = 1500
 
@@ -132,6 +132,7 @@ dynamic_query_levels = [300, 500, 900, 1500]
 initial_smoothness = 1.0
 
 # 损失函数权重
-dq_ce_loss_coef = 1.0  # 边界预测交叉熵损失权重
-dq_l2_loss_coef = 0.5  # 边界预测 L2 正则化权重
-dq_reg_loss_coef = 5.0  # 数量回归损失权重，建议设大一点，让它快速收敛
+# 原始权重导致数量回归损失被压制
+dq_ce_loss_coef = 0.5          # 降低边界分类损失权重
+dq_l2_loss_coef = 0.1          # 降低L2正则化权重
+dq_reg_loss_coef = 10.0        # 【关键】大幅提高数量回归损失权重
