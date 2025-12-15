@@ -1365,47 +1365,42 @@ class SetCriterion(nn.Module):
         #     has_dq = 'dq_outputs' in dn_meta if dn_meta else False
         #     print(f"[Diagnostic] Training={self.training}, dn_meta exist={dn_meta is not None}, has_dq={has_dq}")
 
-        # [修复与增强] 动态查询机制损失计算
+        # 动态查询机制损失计算
         if self.training and dn_meta is not None and 'dq_outputs' in dn_meta:
             dq_outputs = dn_meta['dq_outputs']
 
             # 取出数据
-            interval_probs = dq_outputs.get('interval_probs')
-            raw_boundaries = dq_outputs.get('raw_boundaries')
+            pred_count = dq_outputs.get('predicted_count')
+            interval_logits = dq_outputs.get('interval_logits')
+            target_labels = dq_outputs.get('target_labels')  # 已经在 dynamic_query 中计算好了
             real_counts = dn_meta.get('real_counts')
-            pred_count = dq_outputs.get('predicted_count')  # [新增]
-
-            # 1. 即使没有 real_counts，也要计算 L2 Loss（只要有 raw_boundaries）
-            if raw_boundaries is not None:
-                loss_dq_l2 = torch.mean(raw_boundaries ** 2)
-                losses['loss_dq_l2'] = loss_dq_l2
 
 
             # 2. 如果有 real_counts 和 probs，计算 CE Loss
-            if real_counts is not None:
-                if pred_count is not None:
-                    # 归一化因子，避免大数量时的 Loss 过大
-                    # 预测值和真实值都取 log，关注相对误差而不是绝对误差
-                    # 比如预测 2 vs 真实 4 (误差大)，预测 100 vs 102 (误差小)
-                    loss_dq_reg = F.smooth_l1_loss(
-                        torch.log1p(pred_count),
-                        torch.log1p(real_counts.float()),
-                        beta=1.0
-                    )
-                    losses['loss_dq_reg'] = loss_dq_reg
+            if real_counts is not None and pred_count is not None:
+                # 归一化因子，避免大数量时的 Loss 过大
+                # 预测值和真实值都取 log，关注相对误差而不是绝对误差
+                # 比如预测 2 vs 真实 4 (误差大)，预测 100 vs 102 (误差小)
+                loss_dq_reg = F.smooth_l1_loss(
+                    torch.log1p(pred_count),
+                    torch.log1p(real_counts.float()),
+                    beta=1.0
+                )
+                losses['loss_dq_reg'] = loss_dq_reg
 
                 # B. 计算分类损失
-                if interval_probs is not None:
-                    levels = self.dq_query_levels
-                    target_labels = torch.zeros_like(real_counts, dtype=torch.long)
-
-                    # 向量化生成标签
-                    target_labels[real_counts > levels[0]] = 1
-                    target_labels[real_counts > levels[1]] = 2
-                    target_labels[real_counts > levels[2]] = 3
-
-                    loss_dq_ce = F.nll_loss(torch.log(interval_probs + 1e-6), target_labels)
+                if interval_logits is not None and target_labels is not None:
+                    loss_dq_ce = F.cross_entropy(interval_logits, target_labels)
                     losses['loss_dq_ce'] = loss_dq_ce
+
+                    # 计算准确率 (可选，用于日志)
+                with torch.no_grad():
+                    pred_label = interval_logits.argmax(dim=1)
+                    accuracy = (pred_label == target_labels).float().mean()
+                    # 你可以把这个打印出来看看分类准不准
+
+                    # 移除旧的 L2 Loss (不再预测 raw_boundaries)
+                losses['loss_dq_l2'] = torch.tensor(0.0, device=pred_count.device)
 
             # [Diagnostic] Check failure reason
             # else:
@@ -1627,15 +1622,15 @@ def build_dqdetr(args):
     if hasattr(args, 'dq_ce_loss_coef'):
         weight_dict['loss_dq_ce'] = args.dq_ce_loss_coef
     else:
-        weight_dict['loss_dq_ce'] = 1.0  # 默认值
+        weight_dict['loss_dq_ce'] = 2.0  # 默认值
 
     if hasattr(args, 'dq_l2_loss_coef'):
         weight_dict['loss_dq_l2'] = args.dq_l2_loss_coef
     else:
-        weight_dict['loss_dq_l2'] = 0.5  # 默认值
+        weight_dict['loss_dq_l2'] = 0.0  # 默认值
 
     # [新增] 回归损失权重
-    weight_dict['loss_dq_reg'] = getattr(args, 'dq_reg_loss_coef', 2.0)  # 给予较高的权
+    weight_dict['loss_dq_reg'] = 1.0 # 给予较高的权
 
     clean_weight_dict_wo_dn = copy.deepcopy(weight_dict)
 

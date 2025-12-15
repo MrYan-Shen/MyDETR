@@ -45,7 +45,7 @@ dim_feedforward = 2048  # Transformer中FFN层的隐藏维度
 hidden_dim = 256  # Transformer的特征维度
 dropout = 0.0  # Dropout率
 nheads = 8  # 多头注意力机制中的头数
-num_queries = 900  # **默认的查询数量**（在非动态模式下或作为初始值）
+num_queries = 1500  # **默认的查询数量**（在非动态模式下或作为初始值）
 query_dim = 4
 num_patterns = 0
 pdetr3_bbox_embed_diff_each_layer = False
@@ -133,6 +133,6 @@ initial_smoothness = 1.0
 
 # 损失函数权重
 # 原始权重导致数量回归损失被压制
-dq_ce_loss_coef = 0.5          # 降低边界分类损失权重
+dq_ce_loss_coef = 1.0          # 降低边界分类损失权重
 dq_l2_loss_coef = 0.1          # 降低L2正则化权重
-dq_reg_loss_coef = 10.0        # 【关键】大幅提高数量回归损失权重
+dq_reg_loss_coef = 1.0        # 【关键】大幅提高数量回归损失权重

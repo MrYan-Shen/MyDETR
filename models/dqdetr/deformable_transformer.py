@@ -1258,7 +1258,8 @@ class DeformableTransformer(nn.Module):
                  num_boundaries=3,
                  max_objects=1500,
                  dynamic_query_levels=[300, 500, 900, 1500],
-                 initial_smoothness=1.0
+                 initial_smoothness=1.0,
+
                  ):
         super().__init__()
         self.num_feature_levels = num_feature_levels
@@ -1306,7 +1307,7 @@ class DeformableTransformer(nn.Module):
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
 
         self.dynamic_query_list = dynamic_query_list
-        self.CCM = CategoricalCounting(cls_num=self.ccm_cls_num)
+        # self.CCM = CategoricalCounting(cls_num=self.ccm_cls_num)
         self.CGFE = CGFE(gate_channels=256, reduction_ratio=16, num_feature_levels=self.num_feature_levels)
         self.multiscale = MultiScaleFeature(is_5_scale=True)
 
@@ -1316,7 +1317,8 @@ class DeformableTransformer(nn.Module):
             num_boundaries=num_boundaries,
             max_objects=max_objects,
             query_levels=dynamic_query_levels,
-            initial_smoothness=initial_smoothness
+            initial_smoothness=initial_smoothness,
+            ccm_cls_num=ccm_cls_num
         )
 
         self.encoder = TransformerEncoder(
@@ -1516,12 +1518,9 @@ class DeformableTransformer(nn.Module):
         #########################################################
         # End Encoder
         #########################################################
-
-        counting_output, ccm_feature = self.CCM(memory, spatial_shapes)
-        multi_ccm_feature = self.multiscale(ccm_feature)
-        cgfe_out = self.CGFE(multi_ccm_feature, memory, spatial_shapes)
-        memory = cgfe_out
-
+        bs, seq_len, c = memory.shape
+        h, w = spatial_shapes[0]  # 取最高分辨率层级
+        encoder_feat_map = memory[:, :h * w, :].transpose(1, 2).view(bs, c, h, w)
         # 1. 真实数量 tensor 构建
         real_counts = None
         if self.training and dn_targets is not None:
@@ -1533,24 +1532,33 @@ class DeformableTransformer(nn.Module):
 
         # 2. 执行动态查询
         dq_outputs = self.dynamic_query_module(
-            density_feature=ccm_feature,
-            encoder_features=ccm_feature,
+            feature_map=encoder_feat_map,
             real_counts=real_counts
         )
+        counting_output = dq_outputs['pred_bbox_number']  # 替代 CCM 的计数输出
+        ccm_feature = dq_outputs['density_feature']  # 替代 CCM 的特征图输出
 
-        # [新增] 3. 获取查询数量
+
+        # counting_output, ccm_feature = self.CCM(memory, spatial_shapes)
+        # multi_ccm_feature = self.multiscale(ccm_feature)
+        multi_ccm_feature = self.multiscale(ccm_feature)
+        cgfe_out = self.CGFE(multi_ccm_feature, memory, spatial_shapes)
+        memory = cgfe_out
+
+        # 3. 获取查询数量
         batch_num_queries = dq_outputs['num_queries']
         num_select = batch_num_queries.max().item()
 
-        if random.random() < 0.02:
+        if random.random() < 0.5:
             pred_count = dq_outputs.get('predicted_count', torch.tensor([-1]))
-            # 打印格式：[真实值] vs [预测值] -> [选择的查询数量]
-            # 如果是训练阶段，你应该看到选择的查询数量与真实值更相关
-            rc_str = str(real_counts.long().tolist()) if real_counts is not None else "None"
+            mode = "Train" if self.training else "Eval"
+            rc_str = str(real_counts.long().tolist()) if real_counts is not None else "N/A"
             pc_list = pred_count.detach().cpu().tolist()
             pc_str = "[" + ", ".join([f"{x:.2f}" for x in pc_list]) + "]"
-            print(f"\n[DQ DEBUG] GT:{rc_str} vs Pred:{pc_str} => Queries:{num_select}")
-            print(f"[DQ DEBUG] Boundaries: {dq_outputs['pred_boundaries'][0].detach().cpu().numpy()}")
+            # 显示更多信息
+            chosen_qs = num_select
+            print(f"\n[DQ {mode}] GT:{rc_str} | Pred:{pc_str} | Queries:{chosen_qs}")
+
 
         # 4. 获取动态参考点
         # dq_outputs['reference_points'] 是归一化坐标 [cx, cy, w, h] (已包含 padding)

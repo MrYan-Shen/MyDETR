@@ -22,7 +22,7 @@ class Conv_GN(nn.Module):
         if self.relu is not None:
             x = self.relu(x)
         return x
-        
+
 class Conv_BN(nn.Module):
     """
         包含卷积、Batch Normalization (BN) 和 ReLU 的模块。
@@ -40,7 +40,7 @@ class Conv_BN(nn.Module):
         if self.relu is not None:
             x = self.relu(x)
         return x
-        
+
 class Flatten(nn.Module):
     """将输入张量展平 (保留 Batch 维度)。"""
     def forward(self, x):
@@ -61,7 +61,7 @@ class ChannelGate(nn.Module):
             nn.Linear(gate_channels // reduction_ratio, gate_channels)
             )
         self.pool_types = pool_types
-        
+
     def forward(self, x):
         channel_att_sum = None
         for pool_type in self.pool_types:
@@ -142,7 +142,7 @@ class CGFE(nn.Module):
         self.no_spatial=no_spatial
         if not no_spatial:
             self.SpatialGate = SpatialGate()  # 空间注意力模块
-            
+
     def forward(self, x, memory, spatial_shapes):
         """
             Args:
@@ -179,8 +179,8 @@ class CGFE(nn.Module):
         # 3. 拼接所有级别的特征
         x_out = torch.cat(feats, 1)  # (BS, sum(H*W), 256)
         return x_out
-        
-        
+
+
 class MultiScaleFeature(nn.Module):
     """
         通过步长为 2 的卷积层生成多尺度特征金字塔。
@@ -195,7 +195,7 @@ class MultiScaleFeature(nn.Module):
         if is_5_scale:
             self.conv4 = Conv_GN(channels, channels, kernel_size=3, stride=2, padding=1)
         self.is_5_scale = is_5_scale
-        
+
     def forward(self, x):
         x_out = []
         x_out.append(x)  # 原始尺度 (Scale 1)
@@ -205,7 +205,7 @@ class MultiScaleFeature(nn.Module):
         x_out.append(x)  # Scale 3 (1/4 size)
         x = self.conv3(x)
         x_out.append(x)  # Scale 4 (1/8 size)
-        
+
         if self.is_5_scale:
            x = self.conv4(x)
            x_out.append(x)   # Scale 5 (1/16 size)
